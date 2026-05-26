@@ -1,0 +1,1 @@
+"""AutoTestDesign application package."""

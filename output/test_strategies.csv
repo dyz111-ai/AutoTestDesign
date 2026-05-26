@@ -1,0 +1,22 @@
+Coverage ID,Coverage Item,Related Req,Test Method
+CI-01,使用已注册的邮箱和正确密码登录成功,REQ-1,Decision Table
+CI-02,使用已注册的邮箱但密码错误登录失败,REQ-1,Decision Table
+CI-03,使用未注册的邮箱尝试登录失败,REQ-1,Decision Table
+CI-04,邮箱格式有效，如 user@example.com,REQ-2,Equivalence Partitioning
+CI-05,邮箱缺少 @ 符号，如 userexample.com,REQ-2,Equivalence Partitioning
+CI-06,邮箱缺少域名部分，如 user@.com,REQ-2,Equivalence Partitioning
+CI-07,密码长度为8个字符（有效边界值）,REQ-3,Boundary Value Analysis
+CI-08,密码长度为7个字符（无效边界值）,REQ-3,Boundary Value Analysis
+CI-09,密码为空（无效）,REQ-3,Equivalence Partitioning
+CI-10,密码长度大于8个字符（如9个字符）有效,REQ-3,Boundary Value Analysis
+CI-11,连续4次登录失败后第5次登录成功，账户不被锁定,REQ-4,State Transition Testing
+CI-12,连续5次登录失败后账户被锁定，再次登录失败,REQ-4,State Transition Testing
+CI-13,账户锁定后使用正确密码登录，仍提示锁定错误信息,REQ-4,State Transition Testing
+CI-14,点击“忘记密码”并输入已注册邮箱，系统发送重置邮件,REQ-5,Decision Table
+CI-15,点击“忘记密码”并输入未注册邮箱，系统提示邮箱未注册,REQ-5,Decision Table
+CI-16,邮箱格式无效时显示“邮箱格式不正确”错误信息,REQ-6,Equivalence Partitioning
+CI-17,密码错误时显示“邮箱或密码错误”信息,REQ-6,Decision Table
+CI-18,账户锁定后显示“账户已被锁定”错误信息,REQ-6,State Transition Testing
+CI-19,未注册邮箱尝试登录显示“邮箱或密码错误”信息,REQ-6,Decision Table
+CI-20,单个用户正常登录API响应时间小于2秒,REQ-7,Boundary Value Analysis
+CI-21,模拟50个并发用户登录，平均响应时间小于2秒,REQ-7,Boundary Value Analysis
