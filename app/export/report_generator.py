@@ -90,6 +90,36 @@ def export_risk_analysis(risk_results: list):
     print("✅ Risk analysis exported to output/risk_analysis.csv")
 
 
+def export_state_model(model: dict):
+    rows = []
+    for t in model.get("transitions", []):
+        rows.append({
+            "From State": t["from"],
+            "To State": t["to"],
+            "Event": t.get("event", ""),
+            "Guard": t.get("guard", ""),
+        })
+
+    _write_csv(rows, "output/state_model.csv")
+    print("✅ State model exported to output/state_model.csv")
+
+
+def export_whitebox_sequences(sequences: list):
+    rows = []
+    for seq in sequences:
+        rows.append({
+            "Sequence ID": seq["sequence_id"],
+            "Coverage Criterion": seq["coverage_criterion"],
+            "Path": " → ".join(seq["path"]),
+            "Events": " → ".join(seq["events"]),
+            "Covered States": seq["covered_states"],
+            "Covered Transitions": seq["covered_transitions"],
+        })
+
+    _write_csv(rows, "output/whitebox_sequences.csv")
+    print("✅ White-box sequences exported to output/whitebox_sequences.csv")
+
+
 def _write_csv(rows: list, path: str):
     df = pd.DataFrame(rows)
     os.makedirs("output", exist_ok=True)

@@ -1,10 +1,13 @@
 from app.core.prd_parser import load_prd
 from app.pipeline import (
+    VALID_COVERAGE_CRITERIA,
     VALID_METHODS,
     analyze_coverage,
     analyze_risks,
+    build_state_model,
     extract_requirements,
     generate_coverage_items,
+    generate_sequences,
     generate_testcases,
     select_strategies,
 )
@@ -12,8 +15,10 @@ from app.export import (
     export_coverage,
     export_coverage_items,
     export_risk_analysis,
+    export_state_model,
     export_test_strategies,
     export_testcases,
+    export_whitebox_sequences,
 )
 
 
@@ -43,6 +48,31 @@ def main():
             f"  {item['requirement_id']} | Score: {item['risk_score']} | "
             f"{item['priority']} | {item['reason']}"
         )
+
+    print("\n🔧 Building State Transition Model (White-box)...\n")
+    state_model = build_state_model(requirements)
+    print("✅ State Model Built\n")
+
+    print(f"  Initial State: {state_model.get('initial_state', 'N/A')}")
+    print(f"  States ({len(state_model.get('states', []))}): "
+          f"{', '.join(state_model.get('states', []))}")
+    print(f"  Transitions: {len(state_model.get('transitions', []))}")
+    for t in state_model.get("transitions", []):
+        guard = f" [{t['guard']}]" if t.get("guard") else ""
+        print(f"    {t['from']} --({t.get('event', '')}){guard}--> {t['to']}")
+
+    print(f"\n🧬 Generating White-box Test Sequences...\n")
+    all_sequences = []
+    for criterion in VALID_COVERAGE_CRITERIA:
+        sequences = generate_sequences(state_model, criterion)
+        all_sequences.extend(sequences)
+        print(f"  Criterion: {criterion}")
+        for seq in sequences:
+            print(f"    {seq['sequence_id']} | {seq['coverage_criterion']} | "
+                  f"States: {seq['covered_states']} | "
+                  f"Transitions: {seq['covered_transitions']}")
+            print(f"    Path: {' → '.join(seq['path'])}")
+    print("✅ White-box Sequences Generated\n")
 
     print("\n🎯 Identifying Coverage Items...\n")
     coverage_items = generate_coverage_items(requirements)
@@ -123,6 +153,8 @@ def main():
     export_testcases(testcases)
     export_risk_analysis(risk_results)
     export_coverage(coverage_result)
+    export_state_model(state_model)
+    export_whitebox_sequences(all_sequences)
 
     print("\n🎉 All Reports Generated Successfully!")
 
