@@ -11,15 +11,18 @@ import pandas as pd
 import streamlit as st
 
 from app.pipeline import (
+    VALID_COVERAGE_CRITERIA,
     VALID_METHODS,
-    extract_requirements,
     analyze_risks,
-    generate_coverage_items,
-    select_strategies,
-    generate_testcases,
-    generate_oracle,
     batch_generate_oracles,
+    build_state_model,
+    extract_requirements,
+    generate_coverage_items,
+    generate_oracle,
+    generate_sequences,
+    generate_testcases,
     optimize_test_suite,
+    select_strategies,
 )
 
 # ---------------------------------------------------------------------------
@@ -32,6 +35,9 @@ def _init_state():
         "requirements_text": "",
         "requirements": [],
         "risk_results": [],
+        "state_model": {},
+        "coverage_criterion": "all_states",
+        "whitebox_sequences": [],
         "coverage_items": [],
         "coverage_with_strategy": [],
         "testcases": [],
@@ -83,6 +89,8 @@ def _df_to_records(df: pd.DataFrame) -> list:
 def _all_export_frames() -> dict[str, pd.DataFrame]:
     reqs = st.session_state.requirements
     risks = st.session_state.risk_results
+    model = st.session_state.state_model
+    seqs = st.session_state.whitebox_sequences
     cis = st.session_state.coverage_items
     strategies = st.session_state.coverage_with_strategy
     tcs = st.session_state.testcases
@@ -101,12 +109,31 @@ def _all_export_frames() -> dict[str, pd.DataFrame]:
         row["steps"] = _steps_to_str(row.get("steps", ""))
         opt_rows.append(row)
 
+    seq_rows = []
+    for seq in seqs:
+        row = dict(seq)
+        row["path"] = " → ".join(row.get("path", []))
+        row["events"] = " → ".join(row.get("events", []))
+        seq_rows.append(row)
+
     frames = {
         "requirements": _records_to_df(
             reqs, ["requirement_id", "description", "type"]
         ),
         "risk_analysis": _records_to_df(
             risks, ["requirement_id", "risk_score", "priority", "reason"]
+        ),
+        "state_model": _records_to_df(
+            model.get("transitions", []),
+            ["from", "to", "event", "guard"],
+        ),
+        "whitebox_sequences": _records_to_df(
+            seq_rows,
+            [
+                "sequence_id", "coverage_criterion",
+                "path", "events",
+                "covered_states", "covered_transitions",
+            ],
         ),
         "coverage_items": _records_to_df(
             cis, ["coverage_id", "coverage_item", "related_req"]
@@ -175,7 +202,7 @@ def _build_excel_bytes(frames: dict[str, pd.DataFrame]) -> bytes:
 
 
 def _export_section():
-    st.subheader("10. Export Reports")
+    st.subheader("12. Export Reports")
     frames = _all_export_frames()
     has_data = any(not df.empty for df in frames.values())
 
@@ -206,6 +233,8 @@ def _export_section():
             "app_name": st.session_state.app_name,
             "requirements": st.session_state.requirements,
             "risk_analysis": st.session_state.risk_results,
+            "state_model": st.session_state.state_model,
+            "whitebox_sequences": st.session_state.whitebox_sequences,
             "coverage_items": st.session_state.coverage_items,
             "test_strategies": st.session_state.coverage_with_strategy,
             "testcases": [
@@ -252,8 +281,9 @@ def main():
 
     st.title("AutoTestDesign")
     st.caption(
-        "Interactive workflow: Requirements → Risk → Coverage Items → "
-        "Test Strategies → Test Cases. Review and edit each step before export."
+        "Interactive workflow: Requirements → Risk → State Model → "
+        "White-box Sequences → Coverage Items → Test Strategies → Test Cases. "
+        "Review and edit each step before export."
     )
 
     st.subheader("1. Target Application Name")
@@ -359,7 +389,119 @@ def main():
 
     st.divider()
 
-    st.subheader("5. Coverage Items")
+    st.subheader("5. State Transition Model (White-box)")
+    if st.button(
+        "Build State Model",
+        disabled=not st.session_state.risk_results,
+    ):
+        with st.spinner("Building state transition model..."):
+            try:
+                st.session_state.state_model = build_state_model(
+                    st.session_state.requirements
+                )
+                st.session_state.whitebox_sequences = []
+                st.success(
+                    f"Model has {len(st.session_state.state_model.get('states', []))} states "
+                    f"and {len(st.session_state.state_model.get('transitions', []))} transitions."
+                )
+            except Exception as exc:
+                st.error(f"State model build failed: {exc}")
+
+    model = st.session_state.state_model
+    if model:
+        st.caption(
+            f"Initial State: **{model.get('initial_state', 'N/A')}** | "
+            f"States: {len(model.get('states', []))} | "
+            f"Transitions: {len(model.get('transitions', []))}"
+        )
+
+        states_df = pd.DataFrame(
+            {"State": model.get("states", [])}
+        )
+        edited_states = st.data_editor(
+            states_df,
+            num_rows="dynamic",
+            use_container_width=True,
+            key="editor_states",
+        )
+
+        trans_cols = ["from", "to", "event", "guard"]
+        trans_df = _records_to_df(model.get("transitions", []), trans_cols)
+        edited_trans = st.data_editor(
+            trans_df,
+            num_rows="dynamic",
+            use_container_width=True,
+            column_config={
+                "from": st.column_config.TextColumn("From State"),
+                "to": st.column_config.TextColumn("To State"),
+                "event": st.column_config.TextColumn("Event"),
+                "guard": st.column_config.TextColumn("Guard"),
+            },
+            key="editor_transitions",
+        )
+
+        st.session_state.state_model = {
+            "states": _df_to_records(edited_states),
+            "transitions": _df_to_records(edited_trans),
+            "initial_state": model.get("initial_state", ""),
+        }
+        st.session_state.state_model["states"] = [
+            s["State"] if isinstance(s, dict) else s
+            for s in st.session_state.state_model["states"]
+        ]
+
+    st.divider()
+
+    st.subheader("6. White-box Test Sequences")
+    st.session_state.coverage_criterion = st.selectbox(
+        "Coverage Criterion",
+        options=VALID_COVERAGE_CRITERIA,
+        index=(
+            VALID_COVERAGE_CRITERIA.index(st.session_state.coverage_criterion)
+            if st.session_state.coverage_criterion in VALID_COVERAGE_CRITERIA
+            else 0
+        ),
+        key="select_criterion",
+    )
+
+    if st.button(
+        "Generate Sequences",
+        disabled=not st.session_state.state_model,
+    ):
+        with st.spinner("Generating test sequences..."):
+            try:
+                st.session_state.whitebox_sequences = generate_sequences(
+                    st.session_state.state_model,
+                    st.session_state.coverage_criterion,
+                )
+                st.success(
+                    f"Generated {len(st.session_state.whitebox_sequences)} sequence(s)."
+                )
+            except Exception as exc:
+                st.error(f"Sequence generation failed: {exc}")
+
+    seq_cols = [
+        "sequence_id", "coverage_criterion",
+        "path", "events",
+        "covered_states", "covered_transitions",
+    ]
+    seq_df = _records_to_df(st.session_state.whitebox_sequences, seq_cols)
+    for col in ["path", "events"]:
+        if col in seq_df.columns:
+            seq_df[col] = seq_df[col].apply(
+                lambda x: " → ".join(x) if isinstance(x, list) else str(x) if x else ""
+            )
+    edited_seq = st.data_editor(
+        seq_df,
+        num_rows="dynamic",
+        use_container_width=True,
+        key="editor_sequences",
+    )
+    st.session_state.whitebox_sequences = _df_to_records(edited_seq)
+
+    st.divider()
+
+    st.subheader("7. Coverage Items")
     if st.button(
         "Generate Coverage Items",
         disabled=not st.session_state.risk_results,
@@ -389,7 +531,7 @@ def main():
 
     st.divider()
 
-    st.subheader("6. Test Strategies")
+    st.subheader("8. Test Strategies")
     if st.button(
         "Generate Test Strategies",
         disabled=not st.session_state.coverage_items,
@@ -429,7 +571,7 @@ def main():
 
     st.divider()
 
-    st.subheader("7. Test Cases")
+    st.subheader("9. Test Cases")
     if st.button(
         "Generate Test Cases",
         disabled=not st.session_state.coverage_with_strategy,
@@ -480,7 +622,7 @@ def main():
     # -----------------------------------------------------------------------
     # FR 5.0 – Test Oracle Generation
     # -----------------------------------------------------------------------
-    st.subheader("8. Test Oracle Generation ")
+    st.subheader("10. Test Oracle Generation (FR 5.0)")
     st.caption(
         "Select a requirement and enter specific test data to synthesize a "
         "precise expected result and validation rules."
@@ -576,7 +718,7 @@ def main():
     # -----------------------------------------------------------------------
     # FR 7.0 – Test Suite Optimization
     # -----------------------------------------------------------------------
-    st.subheader("9. Test Suite Optimization")
+    st.subheader("11. Test Suite Optimization (FR 7.0)")
     st.caption(
         "Prioritize or minimize the generated test suite based on risk or "
         "coverage efficiency."
