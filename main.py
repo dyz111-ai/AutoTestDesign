@@ -10,6 +10,7 @@ from app.pipeline import (
     generate_sequences,
     generate_testcases,
     select_strategies,
+    pytest_generator
 )
 from app.export import (
     export_coverage,
@@ -49,30 +50,30 @@ def main():
             f"{item['priority']} | {item['reason']}"
         )
 
-    print("\n🔧 Building State Transition Model (White-box)...\n")
-    state_model = build_state_model(requirements)
-    print("✅ State Model Built\n")
+    # print("\n🔧 Building State Transition Model (White-box)...\n")
+    # state_model = build_state_model(requirements)
+    # print("✅ State Model Built\n")
 
-    print(f"  Initial State: {state_model.get('initial_state', 'N/A')}")
-    print(f"  States ({len(state_model.get('states', []))}): "
-          f"{', '.join(state_model.get('states', []))}")
-    print(f"  Transitions: {len(state_model.get('transitions', []))}")
-    for t in state_model.get("transitions", []):
-        guard = f" [{t['guard']}]" if t.get("guard") else ""
-        print(f"    {t['from']} --({t.get('event', '')}){guard}--> {t['to']}")
+    # print(f"  Initial State: {state_model.get('initial_state', 'N/A')}")
+    # print(f"  States ({len(state_model.get('states', []))}): "
+    #       f"{', '.join(state_model.get('states', []))}")
+    # print(f"  Transitions: {len(state_model.get('transitions', []))}")
+    # for t in state_model.get("transitions", []):
+    #     guard = f" [{t['guard']}]" if t.get("guard") else ""
+    #     print(f"    {t['from']} --({t.get('event', '')}){guard}--> {t['to']}")
 
-    print(f"\n🧬 Generating White-box Test Sequences...\n")
-    all_sequences = []
-    for criterion in VALID_COVERAGE_CRITERIA:
-        sequences = generate_sequences(state_model, criterion)
-        all_sequences.extend(sequences)
-        print(f"  Criterion: {criterion}")
-        for seq in sequences:
-            print(f"    {seq['sequence_id']} | {seq['coverage_criterion']} | "
-                  f"States: {seq['covered_states']} | "
-                  f"Transitions: {seq['covered_transitions']}")
-            print(f"    Path: {' → '.join(seq['path'])}")
-    print("✅ White-box Sequences Generated\n")
+    # print(f"\n🧬 Generating White-box Test Sequences...\n")
+    # all_sequences = []
+    # for criterion in VALID_COVERAGE_CRITERIA:
+    #     sequences = generate_sequences(state_model, criterion)
+    #     all_sequences.extend(sequences)
+    #     print(f"  Criterion: {criterion}")
+    #     for seq in sequences:
+    #         print(f"    {seq['sequence_id']} | {seq['coverage_criterion']} | "
+    #               f"States: {seq['covered_states']} | "
+    #               f"Transitions: {seq['covered_transitions']}")
+    #         print(f"    Path: {' → '.join(seq['path'])}")
+    # print("✅ White-box Sequences Generated\n")
 
     print("\n🎯 Identifying Coverage Items...\n")
     coverage_items = generate_coverage_items(requirements)

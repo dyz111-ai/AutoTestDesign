@@ -5,7 +5,10 @@ Run: streamlit run streamlit_app.py
 """
 
 import json
+import os
+import subprocess
 from io import BytesIO
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -18,6 +21,7 @@ from app.pipeline import (
     build_state_model,
     extract_requirements,
     generate_coverage_items,
+    generate_pytest,
     generate_oracle,
     generate_sequences,
     generate_testcases,
@@ -41,6 +45,10 @@ def _init_state():
         "coverage_items": [],
         "coverage_with_strategy": [],
         "testcases": [],
+        "source_files": {},
+        "generated_pytest": "",
+        "project_dir": "",
+        "pytest_output": "",
         "oracles": [],
         "optimized_testcases": [],
         "optimization_metrics": {},
@@ -73,7 +81,10 @@ def _steps_from_str(text) -> list:
 def _records_to_df(records: list, columns: list) -> pd.DataFrame:
     if not records:
         return pd.DataFrame(columns=columns)
-    return pd.DataFrame(records)[columns]
+    df = pd.DataFrame(records)
+    # Keep only the requested columns that exist in the data
+    available = [c for c in columns if c in df.columns]
+    return df[available]
 
 
 def _df_to_records(df: pd.DataFrame) -> list:
@@ -202,7 +213,7 @@ def _build_excel_bytes(frames: dict[str, pd.DataFrame]) -> bytes:
 
 
 def _export_section():
-    st.subheader("12. Export Reports")
+    st.subheader("13. Export Reports")
     frames = _all_export_frames()
     has_data = any(not df.empty for df in frames.values())
 
@@ -285,6 +296,58 @@ def main():
         "White-box Sequences → Coverage Items → Test Strategies → Test Cases. "
         "Review and edit each step before export."
     )
+
+    # -------------------------------------------------------------------
+    # 0. Source Files (placed at top; processing happens at step 10)
+    # -------------------------------------------------------------------
+    st.subheader("0. Source Files Under Test")
+
+    col_dir, col_files = st.columns([1, 2])
+
+    with col_dir:
+        st.session_state.project_dir = st.text_input(
+            "Project root directory",
+            value=st.session_state.project_dir,
+            placeholder="/path/to/your/project",
+            help=(
+                "Filesystem path to the project.  Generated pytest files "
+                "will be saved to this directory's `tests/` subfolder and "
+                "executed from here."
+            ),
+            key="input_project_dir",
+        )
+
+    with col_files:
+        uploaded_files = st.file_uploader(
+            "Select source files (.py) to test",
+            type=["py"],
+            accept_multiple_files=True,
+            key="pytest_source_uploader",
+            help=(
+                "Upload the Python source files that define the functions/"
+                "classes under test.  The LLM uses these to generate "
+                "correct imports and function calls."
+            ),
+        )
+
+    if uploaded_files:
+        source_files = {}
+        for uf in uploaded_files:
+            try:
+                content = uf.read().decode("utf-8")
+            except UnicodeDecodeError:
+                st.warning(f"Skipping {uf.name}: not a UTF-8 text file.")
+                continue
+            source_files[uf.name] = content
+        st.session_state.source_files = source_files
+
+        if source_files:
+            st.caption(
+                f"Loaded {len(source_files)} file(s): "
+                + ", ".join(f"`{n}`" for n in source_files)
+            )
+
+    st.divider()
 
     st.subheader("1. Target Application Name")
     st.session_state.app_name = st.text_input(
@@ -620,9 +683,137 @@ def main():
     st.divider()
 
     # -----------------------------------------------------------------------
+    # 10. Generate Pytest Files (processing happens here)
+    # -----------------------------------------------------------------------
+    st.subheader("10. Generate Pytest Files")
+
+    gen_disabled = (
+        not st.session_state.testcases
+        or not st.session_state.source_files
+    )
+
+    if st.button(
+        "Generate Pytest Files",
+        type="primary",
+        disabled=gen_disabled,
+        key="btn_generate_pytest",
+    ):
+        with st.spinner(
+            "Generating pytest file from test cases and source code..."
+        ):
+            try:
+                st.session_state.generated_pytest = generate_pytest(
+                    testcases=st.session_state.testcases,
+                    source_files=st.session_state.source_files,
+                    app_name=st.session_state.app_name,
+                )
+                st.session_state.pytest_output = ""
+                st.success("Pytest file generated.")
+            except Exception as exc:
+                st.error(f"Pytest generation failed: {exc}")
+
+    if st.session_state.generated_pytest:
+        st.caption("Preview — edit in the text area below if needed:")
+        edited_code = st.text_area(
+            "Generated pytest code",
+            value=st.session_state.generated_pytest,
+            height=300,
+            key="editor_pytest_code",
+            label_visibility="collapsed",
+        )
+        st.session_state.generated_pytest = edited_code
+
+        app_slug = (
+            st.session_state.app_name.strip().replace(" ", "_")
+            or "generated"
+        )
+        st.download_button(
+            label="Download pytest file",
+            data=st.session_state.generated_pytest.encode("utf-8"),
+            file_name=f"test_{app_slug}.py",
+            mime="text/x-python",
+            key="dl_pytest_file",
+        )
+
+        # ---- Save to disk and run pytest ----
+        project_dir = st.session_state.project_dir.strip()
+        if project_dir and os.path.isdir(project_dir):
+            tests_dir = os.path.join(project_dir, "tests")
+            os.makedirs(tests_dir, exist_ok=True)
+
+            if st.button(
+                "Save & Run Pytest",
+                type="secondary",
+                key="btn_run_pytest",
+            ):
+                test_path = os.path.join(
+                    tests_dir, f"test_{app_slug}.py"
+                )
+                try:
+                    with open(test_path, "w", encoding="utf-8") as f:
+                        f.write(st.session_state.generated_pytest)
+                    st.success(
+                        f"Saved to `{test_path}`"
+                    )
+                except OSError as exc:
+                    st.error(f"Failed to save pytest file: {exc}")
+
+                # ---- Run pytest ----
+                with st.spinner(
+                    f"Running pytest in `{project_dir}`..."
+                ):
+                    try:
+                        result = subprocess.run(
+                            [
+                                "python", "-m", "pytest",
+                                os.path.relpath(test_path, project_dir),
+                                "-v",
+                            ],
+                            cwd=project_dir,
+                            capture_output=True,
+                            text=True,
+                            timeout=120,
+                        )
+                        st.session_state.pytest_output = (
+                            result.stdout + result.stderr
+                        )
+                    except subprocess.TimeoutExpired:
+                        st.session_state.pytest_output = (
+                            "Pytest timed out after 120 seconds."
+                        )
+                    except FileNotFoundError:
+                        st.session_state.pytest_output = (
+                            "`pytest` not found.  "
+                            "Install it with: pip install pytest"
+                        )
+                    except Exception as exc:
+                        st.session_state.pytest_output = (
+                            f"Failed to run pytest: {exc}"
+                        )
+        elif project_dir:
+            st.warning(
+                f"Directory `{project_dir}` does not exist.  "
+                "Specify a valid project directory above to save & run."
+            )
+
+        # ---- Display pytest output ----
+        if st.session_state.pytest_output:
+            st.subheader("Pytest Output")
+            st.code(st.session_state.pytest_output, language="text")
+            if "failed" in st.session_state.pytest_output.lower():
+                st.warning(
+                    "Some tests failed — review the output above."
+                )
+            else:
+                st.success("All tests passed!" if st.session_state.pytest_output.strip() else "")
+        # ---- End save & run ----
+
+    st.divider()
+
+    # -----------------------------------------------------------------------
     # FR 5.0 – Test Oracle Generation
     # -----------------------------------------------------------------------
-    st.subheader("10. Test Oracle Generation (FR 5.0)")
+    st.subheader("11. Test Oracle Generation (FR 5.0)")
     st.caption(
         "Select a requirement and enter specific test data to synthesize a "
         "precise expected result and validation rules."
@@ -718,7 +909,7 @@ def main():
     # -----------------------------------------------------------------------
     # FR 7.0 – Test Suite Optimization
     # -----------------------------------------------------------------------
-    st.subheader("11. Test Suite Optimization (FR 7.0)")
+    st.subheader("12. Test Suite Optimization (FR 7.0)")
     st.caption(
         "Prioritize or minimize the generated test suite based on risk or "
         "coverage efficiency."
