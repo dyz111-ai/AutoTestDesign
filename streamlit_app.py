@@ -213,7 +213,7 @@ def _build_excel_bytes(frames: dict[str, pd.DataFrame]) -> bytes:
 
 
 def _export_section():
-    st.subheader("12. Export Reports")
+    st.subheader("13. Export Reports")
     frames = _all_export_frames()
     has_data = any(not df.empty for df in frames.values())
 
@@ -813,7 +813,7 @@ def main():
     # -----------------------------------------------------------------------
     # FR 5.0 – Test Oracle Generation
     # -----------------------------------------------------------------------
-    st.subheader("10. Test Oracle Generation (FR 5.0)")
+    st.subheader("11. Test Oracle Generation (FR 5.0)")
     st.caption(
         "Select a requirement and enter specific test data to synthesize a "
         "precise expected result and validation rules."
@@ -909,7 +909,7 @@ def main():
     # -----------------------------------------------------------------------
     # FR 7.0 – Test Suite Optimization
     # -----------------------------------------------------------------------
-    st.subheader("11. Test Suite Optimization (FR 7.0)")
+    st.subheader("12. Test Suite Optimization (FR 7.0)")
     st.caption(
         "Prioritize or minimize the generated test suite based on risk or "
         "coverage efficiency."
