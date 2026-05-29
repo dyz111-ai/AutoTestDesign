@@ -17,12 +17,15 @@ from app.pipeline import (
     VALID_COVERAGE_CRITERIA,
     VALID_METHODS,
     analyze_risks,
+    batch_generate_oracles,
     build_state_model,
     extract_requirements,
     generate_coverage_items,
     generate_pytest,
+    generate_oracle,
     generate_sequences,
     generate_testcases,
+    optimize_test_suite,
     select_strategies,
 )
 
@@ -46,6 +49,9 @@ def _init_state():
         "generated_pytest": "",
         "project_dir": "",
         "pytest_output": "",
+        "oracles": [],
+        "optimized_testcases": [],
+        "optimization_metrics": {},
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -99,12 +105,20 @@ def _all_export_frames() -> dict[str, pd.DataFrame]:
     cis = st.session_state.coverage_items
     strategies = st.session_state.coverage_with_strategy
     tcs = st.session_state.testcases
+    oracles = st.session_state.oracles
+    opt_tcs = st.session_state.optimized_testcases
 
     tc_rows = []
     for tc in tcs:
         row = dict(tc)
         row["steps"] = _steps_to_str(row.get("steps", ""))
         tc_rows.append(row)
+
+    opt_rows = []
+    for tc in opt_tcs:
+        row = dict(tc)
+        row["steps"] = _steps_to_str(row.get("steps", ""))
+        opt_rows.append(row)
 
     seq_rows = []
     for seq in seqs:
@@ -113,7 +127,7 @@ def _all_export_frames() -> dict[str, pd.DataFrame]:
         row["events"] = " → ".join(row.get("events", []))
         seq_rows.append(row)
 
-    return {
+    frames = {
         "requirements": _records_to_df(
             reqs, ["requirement_id", "description", "type"]
         ),
@@ -155,6 +169,39 @@ def _all_export_frames() -> dict[str, pd.DataFrame]:
         ),
     }
 
+    if oracles:
+        frames["test_oracles"] = _records_to_df(
+            oracles,
+            [
+                "tc_id",
+                "coverage_id",
+                "requirement_id",
+                "test_data",
+                "expected_output",
+                "validation_rules",
+                "oracle_type",
+                "rationale",
+            ],
+        )
+
+    if opt_rows:
+        frames["optimized_testcases"] = _records_to_df(
+            opt_rows,
+            [
+                "tc_id",
+                "req_id",
+                "coverage_id",
+                "test_method",
+                "priority",
+                "preconditions",
+                "test_data",
+                "steps",
+                "expected_result",
+            ],
+        )
+
+    return frames
+
 
 def _build_excel_bytes(frames: dict[str, pd.DataFrame]) -> bytes:
     buffer = BytesIO()
@@ -166,7 +213,7 @@ def _build_excel_bytes(frames: dict[str, pd.DataFrame]) -> bytes:
 
 
 def _export_section():
-    st.subheader("11. Export Reports")
+    st.subheader("12. Export Reports")
     frames = _all_export_frames()
     has_data = any(not df.empty for df in frames.values())
 
@@ -760,6 +807,194 @@ def main():
             else:
                 st.success("All tests passed!" if st.session_state.pytest_output.strip() else "")
         # ---- End save & run ----
+
+    st.divider()
+
+    # -----------------------------------------------------------------------
+    # FR 5.0 – Test Oracle Generation
+    # -----------------------------------------------------------------------
+    st.subheader("10. Test Oracle Generation (FR 5.0)")
+    st.caption(
+        "Select a requirement and enter specific test data to synthesize a "
+        "precise expected result and validation rules."
+    )
+
+    oracle_mode = st.radio(
+        "Oracle generation mode",
+        ["Single Oracle (interactive)", "Batch – enrich all test cases"],
+        horizontal=True,
+        key="oracle_mode",
+    )
+
+    if oracle_mode == "Single Oracle (interactive)":
+        req_options = {
+            f"{r['requirement_id']}: {r['description'][:60]}": r
+            for r in st.session_state.requirements
+        }
+        if req_options:
+            selected_label = st.selectbox(
+                "Requirement", list(req_options.keys()), key="oracle_req_select"
+            )
+            selected_req = req_options[selected_label]
+            oracle_input = st.text_area(
+                "Test data / input scenario",
+                placeholder="e.g. email=test@example.com, password=abc (7 chars)",
+                key="oracle_input",
+                height=80,
+            )
+            if st.button(
+                "Generate Oracle",
+                type="primary",
+                disabled=not oracle_input.strip(),
+            ):
+                with st.spinner("Synthesizing test oracle..."):
+                    try:
+                        result = generate_oracle(selected_req, oracle_input.strip())
+                        st.success("Oracle generated.")
+                        col_a, col_b = st.columns(2)
+                        with col_a:
+                            st.markdown("**Expected Output**")
+                            st.info(result.get("expected_output", "—"))
+                            st.markdown(f"**Oracle Type:** `{result.get('oracle_type', '—')}`")
+                        with col_b:
+                            st.markdown("**Validation Rules**")
+                            for rule in result.get("validation_rules", []):
+                                st.markdown(f"- {rule}")
+                        st.markdown("**Rationale**")
+                        st.write(result.get("rationale", "—"))
+                    except Exception as exc:
+                        st.error(f"Oracle generation failed: {exc}")
+        else:
+            st.info("Parse requirements first (Step 3).")
+
+    else:
+        st.caption(
+            "Generates an oracle for every test case using its requirement "
+            "context and test data. This calls the LLM once per test case."
+        )
+        n_tcs = len(st.session_state.testcases)
+        if st.button(
+            f"Batch Generate Oracles ({n_tcs} test cases)",
+            type="primary",
+            disabled=not st.session_state.testcases,
+        ):
+            with st.spinner(f"Generating {n_tcs} oracles..."):
+                try:
+                    oracles = batch_generate_oracles(
+                        st.session_state.requirements,
+                        st.session_state.testcases,
+                    )
+                    st.session_state.oracles = oracles
+                    st.success(f"Generated {len(oracles)} oracles.")
+                except Exception as exc:
+                    st.error(f"Batch oracle generation failed: {exc}")
+
+        if st.session_state.oracles:
+            oracle_df_cols = [
+                "tc_id", "coverage_id", "requirement_id",
+                "test_data", "expected_output", "oracle_type", "rationale",
+            ]
+            oracle_display = []
+            for o in st.session_state.oracles:
+                row = {c: o.get(c, "") for c in oracle_df_cols}
+                row["validation_rules"] = " | ".join(o.get("validation_rules", []))
+                oracle_display.append(row)
+            st.dataframe(
+                pd.DataFrame(oracle_display),
+                use_container_width=True,
+            )
+
+    st.divider()
+
+    # -----------------------------------------------------------------------
+    # FR 7.0 – Test Suite Optimization
+    # -----------------------------------------------------------------------
+    st.subheader("11. Test Suite Optimization (FR 7.0)")
+    st.caption(
+        "Prioritize or minimize the generated test suite based on risk or "
+        "coverage efficiency."
+    )
+
+    opt_strategy = st.radio(
+        "Optimization strategy",
+        [
+            "risk – Sort & filter by risk priority",
+            "coverage – Remove redundant test cases",
+            "both – Minimize then prioritize",
+        ],
+        horizontal=True,
+        key="opt_strategy",
+    )
+    strategy_key = opt_strategy.split(" – ")[0]
+
+    min_prio = st.select_slider(
+        "Minimum priority to keep (for risk-based strategies)",
+        options=["High", "Medium", "Low"],
+        value="Low",
+        key="opt_min_priority",
+    )
+
+    if st.button(
+        "Optimize Test Suite",
+        type="primary",
+        disabled=not st.session_state.testcases,
+    ):
+        source = st.session_state.testcases
+        with st.spinner("Optimizing..."):
+            try:
+                optimized, metrics = optimize_test_suite(
+                    source, strategy=strategy_key, min_priority=min_prio
+                )
+                st.session_state.optimized_testcases = optimized
+                st.session_state.optimization_metrics = metrics
+                st.success(
+                    f"Optimized: {metrics['original_count']} → "
+                    f"{metrics['optimized_count']} test cases "
+                    f"(removed {metrics['removed_count']})."
+                )
+            except Exception as exc:
+                st.error(f"Optimization failed: {exc}")
+
+    if st.session_state.optimization_metrics:
+        m = st.session_state.optimization_metrics
+        cols = st.columns(4)
+        cols[0].metric("Original", m.get("original_count", 0))
+        cols[1].metric("Optimized", m.get("optimized_count", 0))
+        cols[2].metric("Removed", m.get("removed_count", 0))
+        cols[3].metric(
+            "High priority",
+            m.get("high_count", "—"),
+        )
+        st.caption(f"Strategy applied: **{m.get('strategy', '—')}**")
+
+    if st.session_state.optimized_testcases:
+        edited_opt = st.data_editor(
+            _records_to_df(
+                st.session_state.optimized_testcases,
+                [
+                    "tc_id",
+                    "req_id",
+                    "coverage_id",
+                    "test_method",
+                    "priority",
+                    "preconditions",
+                    "test_data",
+                    "steps",
+                    "expected_result",
+                ],
+            ),
+            num_rows="dynamic",
+            use_container_width=True,
+            column_config={
+                "test_method": st.column_config.SelectboxColumn(options=VALID_METHODS),
+                "priority": st.column_config.SelectboxColumn(
+                    options=["High", "Medium", "Low"]
+                ),
+                "steps": st.column_config.TextColumn(help="Separate steps with |"),
+            },
+            key="editor_optimized",
+        )
+        st.session_state.optimized_testcases = _df_to_records(edited_opt)
 
     st.divider()
     _export_section()
