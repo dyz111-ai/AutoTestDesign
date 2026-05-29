@@ -1,7 +1,8 @@
-"""Test design pipeline: requirements → risk → coverage → strategy → test cases + white-box modeling."""
+"""Test design pipeline: requirements → risk → coverage → strategy → test cases + white-box modeling + pytest generation."""
 
 from app.pipeline.coverage_analyzer import analyze_coverage
 from app.pipeline.coverage_item_generator import generate_coverage_items
+from app.pipeline.pytest_generator import generate_pytest
 from app.pipeline.requirement_extractor import extract_requirements
 from app.pipeline.risk_analyzer import analyze_risks
 from app.pipeline.strategy_selector import VALID_METHODS, select_strategies
@@ -23,4 +24,5 @@ __all__ = [
     "build_state_model",
     "VALID_COVERAGE_CRITERIA",
     "generate_sequences",
+    "generate_pytest",
 ]

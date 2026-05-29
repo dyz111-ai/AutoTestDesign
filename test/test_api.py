@@ -9,7 +9,7 @@ response = client.chat.completions.create(
     model=DEFAULT_MODEL,
     messages=[
         {"role": "system", "content": "You are a helpful assistant"},
-        {"role": "user", "content": "你好!"},
+        {"role": "user", "content": "查看这个仓库，总结主要功能：https://github.com/HtSimple/CartFlow"},
     ],
     stream=False,
 )
