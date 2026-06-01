@@ -19,12 +19,14 @@ from app.pipeline import (
     analyze_risks,
     batch_generate_oracles,
     build_state_model,
+    coverage_items_from_whitebox,
     extract_requirements,
     generate_coverage_items,
     generate_pytest,
     generate_oracle,
     generate_sequences,
     generate_testcases,
+    merge_coverage_items,
     optimize_test_suite,
     select_strategies,
 )
@@ -50,7 +52,6 @@ def _init_state():
         "project_dir": "",
         "pytest_output": "",
         "oracles": [],
-        "optimized_testcases": [],
         "optimization_metrics": {},
     }
     for key, value in defaults.items():
@@ -59,11 +60,73 @@ def _init_state():
 
 
 def _prd_payload() -> str:
-    app = st.session_state.app_name.strip()
-    body = st.session_state.requirements_text.strip()
-    if app:
-        return f"Target Application: {app}\n\nRequirements:\n{body}"
-    return body
+    return st.session_state.requirements_text.strip()
+
+
+def _state_node_id(name: str) -> str:
+    """Mermaid-safe node id."""
+    slug = "".join(c if c.isalnum() else "_" for c in str(name).strip())
+    return f"S_{slug or 'state'}"
+
+
+def _build_state_diagram_mermaid(model: dict) -> str:
+    """Build a Mermaid flowchart: states as nodes, transitions labeled with event/guard."""
+    transitions = model.get("transitions", [])
+    states = list(model.get("states", []))
+
+    for t in transitions:
+        for key in ("from", "to"):
+            s = t.get(key, "")
+            if s and s not in states:
+                states.append(s)
+
+    lines = ["flowchart TD"]
+    lines.append(
+        "    classDef startNode fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px"
+    )
+    lines.append(
+        "    classDef stateNode fill:#e3f2fd,stroke:#1565c0,stroke-width:1px"
+    )
+
+    initial = model.get("initial_state", "")
+    if initial:
+        lines.append('    __start__(["Initial"]):::startNode')
+        lines.append(f"    __start__ --> {_state_node_id(initial)}")
+
+    for state in states:
+        sid = _state_node_id(state)
+        label = str(state).replace('"', "'")
+        lines.append(f'    {sid}["{label}"]:::stateNode')
+
+    for t in transitions:
+        frm = _state_node_id(t.get("from", ""))
+        to = _state_node_id(t.get("to", ""))
+        event = str(t.get("event", "")).replace("\u0022", "'")
+        guard = str(t.get("guard", "")).replace("\u0022", "'")
+        if guard:
+            edge_label = f"{event} / {guard}"
+        else:
+            edge_label = event or "transition"
+        lines.append(f'    {frm} -->|"{edge_label}"| {to}')
+
+    return "\n".join(lines)
+
+
+def _render_state_model_graph(model: dict):
+    if not model or not model.get("transitions"):
+        st.caption("Build the state model to see the transition diagram.")
+        return
+    mermaid = _build_state_diagram_mermaid(model)
+    st.markdown("**State Transition Diagram**")
+    st.caption("Arrows: state transitions · Labels: event / guard condition")
+    html = f"""
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <pre class="mermaid">{mermaid}</pre>
+    <script>
+        mermaid.initialize({{ startOnLoad: true, theme: "default", flowchart: {{ useMaxWidth: true }} }});
+    </script>
+    """
+    st.components.v1.html(html, height=480, scrolling=True)
 
 
 def _steps_to_str(steps) -> str:
@@ -93,6 +156,134 @@ def _df_to_records(df: pd.DataFrame) -> list:
     return df.fillna("").to_dict("records")
 
 
+def _has_whitebox_artifacts() -> bool:
+    model = st.session_state.state_model or {}
+    return bool(model.get("transitions")) or bool(st.session_state.whitebox_sequences)
+
+
+def _whitebox_coverage_items() -> list:
+    return coverage_items_from_whitebox(
+        st.session_state.state_model,
+        _normalize_whitebox_sequences(st.session_state.whitebox_sequences),
+        st.session_state.requirements,
+    )
+
+
+def _normalize_whitebox_sequences(sequences: list) -> list:
+    """Restore list path/events after data_editor string display."""
+    out = []
+    for seq in sequences or []:
+        s = dict(seq)
+        for key in ("path", "events"):
+            val = s.get(key)
+            if isinstance(val, str) and val.strip():
+                s[key] = [
+                    p.strip()
+                    for p in val.replace(" → ", "→").split("→")
+                    if p.strip()
+                ]
+        out.append(s)
+    return out
+
+
+def _reset_data_editors(*keys: str):
+    """Clear st.data_editor widget state so new data is not overwritten."""
+    for key in keys:
+        st.session_state.pop(key, None)
+
+
+COVERAGE_ITEM_COLUMNS = ["coverage_id", "coverage_item", "related_req"]
+
+STRATEGY_TC_COLUMNS = [
+    "coverage_id",
+    "coverage_item",
+    "test_method",
+    "priority",
+    "preconditions",
+    "test_data",
+    "steps",
+    "expected_result",
+]
+
+
+def _row_id(item: dict) -> str:
+    return str(item.get("coverage_id") or item.get("tc_id") or "").strip()
+
+
+def _merge_strategy_tc_rows(
+    coverage_items: list,
+    coverage_with_strategy: list,
+    testcases: list,
+) -> list:
+    """Merge strategies and test cases for Tab 2 (ordered by coverage items)."""
+    strat_map = {
+        s.get("coverage_id"): s for s in coverage_with_strategy if s.get("coverage_id")
+    }
+    tc_map: dict[str, dict] = {}
+    for t in testcases:
+        key = _row_id(t)
+        if key:
+            tc_map[key] = t
+
+    rows = []
+    for ci in coverage_items:
+        cid = ci.get("coverage_id", "")
+        if not cid:
+            continue
+        strat = strat_map.get(cid, {})
+        tc = tc_map.get(cid, {})
+        rows.append({
+            "coverage_id": cid,
+            "coverage_item": ci.get("coverage_item") or strat.get("coverage_item", ""),
+            "test_method": strat.get("test_method") or tc.get("test_method", ""),
+            "priority": tc.get("priority", ""),
+            "preconditions": tc.get("preconditions", ""),
+            "test_data": tc.get("test_data", ""),
+            "steps": _steps_to_str(tc.get("steps", "")),
+            "expected_result": tc.get("expected_result", ""),
+        })
+    return rows
+
+
+def _split_strategy_tc_rows(
+    rows: list,
+    coverage_items: list,
+) -> tuple[list, list]:
+    """Split Tab 2 back into strategies and test cases."""
+    ci_map = {c.get("coverage_id"): c for c in coverage_items if c.get("coverage_id")}
+    coverage_with_strategy = []
+    testcases = []
+
+    for row in rows:
+        cid = str(row.get("coverage_id", "")).strip()
+        if not cid:
+            continue
+        ci = ci_map.get(cid, {})
+        related_req = ci.get("related_req", "")
+        coverage_item = ci.get("coverage_item") or str(row.get("coverage_item", ""))
+
+        test_method = str(row.get("test_method", "")).strip()
+        coverage_with_strategy.append({
+            "coverage_id": cid,
+            "coverage_item": coverage_item,
+            "related_req": related_req,
+            "test_method": test_method,
+        })
+        testcases.append({
+            "tc_id": cid,
+            "req_id": related_req,
+            "coverage_id": cid,
+            "test_method": test_method,
+            "priority": row.get("priority", ""),
+            "preconditions": row.get("preconditions", ""),
+            "test_data": row.get("test_data", ""),
+            "steps": row.get("steps", ""),
+            "expected_result": row.get("expected_result", ""),
+        })
+
+    return coverage_with_strategy, testcases
+
+
 # ---------------------------------------------------------------------------
 # Export helpers
 # ---------------------------------------------------------------------------
@@ -106,19 +297,12 @@ def _all_export_frames() -> dict[str, pd.DataFrame]:
     strategies = st.session_state.coverage_with_strategy
     tcs = st.session_state.testcases
     oracles = st.session_state.oracles
-    opt_tcs = st.session_state.optimized_testcases
 
     tc_rows = []
     for tc in tcs:
         row = dict(tc)
         row["steps"] = _steps_to_str(row.get("steps", ""))
         tc_rows.append(row)
-
-    opt_rows = []
-    for tc in opt_tcs:
-        row = dict(tc)
-        row["steps"] = _steps_to_str(row.get("steps", ""))
-        opt_rows.append(row)
 
     seq_rows = []
     for seq in seqs:
@@ -184,22 +368,6 @@ def _all_export_frames() -> dict[str, pd.DataFrame]:
             ],
         )
 
-    if opt_rows:
-        frames["optimized_testcases"] = _records_to_df(
-            opt_rows,
-            [
-                "tc_id",
-                "req_id",
-                "coverage_id",
-                "test_method",
-                "priority",
-                "preconditions",
-                "test_data",
-                "steps",
-                "expected_result",
-            ],
-        )
-
     return frames
 
 
@@ -213,7 +381,7 @@ def _build_excel_bytes(frames: dict[str, pd.DataFrame]) -> bytes:
 
 
 def _export_section():
-    st.subheader("13. Export Reports")
+    st.subheader("7. Export Reports")
     frames = _all_export_frames()
     has_data = any(not df.empty for df in frames.values())
 
@@ -221,9 +389,7 @@ def _export_section():
         st.info("Generate and edit data above before exporting.")
         return
 
-    app_slug = (
-        st.session_state.app_name.strip().replace(" ", "_") or "qa_export"
-    )
+    app_slug = "autotest_export"
 
     col1, col2, col3 = st.columns(3)
 
@@ -241,7 +407,6 @@ def _export_section():
 
     with col2:
         payload = {
-            "app_name": st.session_state.app_name,
             "requirements": st.session_state.requirements,
             "risk_analysis": st.session_state.risk_results,
             "state_model": st.session_state.state_model,
@@ -292,8 +457,8 @@ def main():
 
     st.title("AutoTestDesign")
     st.caption(
-        "Interactive workflow: Requirements → Risk → State Model → "
-        "White-box Sequences → Coverage Items → Test Strategies → Test Cases. "
+        "Interactive workflow: Requirements → Risk → White-box → "
+        "Black-box Test Design → Pytest / Export. "
         "Review and edit each step before export."
     )
 
@@ -349,15 +514,7 @@ def main():
 
     st.divider()
 
-    st.subheader("1. Target Application Name")
-    st.session_state.app_name = st.text_input(
-        "Application name",
-        value=st.session_state.app_name,
-        placeholder="e.g. Web Login Module",
-        label_visibility="collapsed",
-    )
-
-    st.subheader("2. Requirements")
+    st.subheader("1. Requirements")
     st.session_state.requirements_text = st.text_area(
         "PRD text",
         value=st.session_state.requirements_text,
@@ -367,35 +524,39 @@ def main():
     )
 
     sample_path = "sample_prd/login_prd.txt"
-    if st.button("Load sample PRD"):
-        try:
-            with open(sample_path, encoding="utf-8") as f:
-                st.session_state.requirements_text = f.read()
-            st.session_state.app_name = "Web Login Module"
-            st.rerun()
-        except OSError:
-            st.error(f"Could not load {sample_path}")
+    col_load, col_parse = st.columns([1, 1])
+    with col_load:
+        if st.button("Load sample PRD"):
+            try:
+                with open(sample_path, encoding="utf-8") as f:
+                    st.session_state.requirements_text = f.read()
+                st.rerun()
+            except OSError:
+                st.error(f"Could not load {sample_path}")
+    with col_parse:
+        parse_clicked = st.button("Parse Requirements", type="primary")
 
-    st.divider()
-
-    st.subheader("3. Parse Requirements")
-    if st.button("Parse Requirements", type="primary"):
+    if parse_clicked:
         text = _prd_payload()
         if not text.strip():
-            st.warning("Enter application name and/or requirements first.")
+            st.warning("Enter requirements text first.")
         else:
             with st.spinner("Extracting structured requirements..."):
                 try:
                     st.session_state.requirements = extract_requirements(text)
                     st.session_state.risk_results = []
+                    st.session_state.state_model = {}
+                    st.session_state.whitebox_sequences = []
                     st.session_state.coverage_items = []
                     st.session_state.coverage_with_strategy = []
                     st.session_state.testcases = []
+                    _reset_data_editors("editor_coverage_items", "editor_strategy_tc")
                     st.success(
                         f"Parsed {len(st.session_state.requirements)} requirement(s)."
                     )
                 except Exception as exc:
                     st.error(f"Parse failed: {exc}")
+
     edited_req = st.data_editor(
         _records_to_df(
             st.session_state.requirements,
@@ -409,7 +570,7 @@ def main():
 
     st.divider()
 
-    st.subheader("4. Risk Analysis")
+    st.subheader("2. Risk Analysis")
     if st.button(
         "Generate Risk Analysis",
         disabled=not st.session_state.requirements,
@@ -419,9 +580,12 @@ def main():
                 st.session_state.risk_results = analyze_risks(
                     st.session_state.requirements
                 )
+                st.session_state.state_model = {}
+                st.session_state.whitebox_sequences = []
                 st.session_state.coverage_items = []
                 st.session_state.coverage_with_strategy = []
                 st.session_state.testcases = []
+                _reset_data_editors("editor_coverage_items", "editor_strategy_tc")
                 st.success("Risk analysis complete.")
             except Exception as exc:
                 st.error(f"Risk analysis failed: {exc}")
@@ -452,7 +616,11 @@ def main():
 
     st.divider()
 
-    st.subheader("5. State Transition Model (White-box)")
+    st.subheader("3. State Transition Model & Test Sequences (White-box)")
+    st.caption(
+        "State paths and transitions from this step can be merged into "
+        "**Step 4 → Coverage Items** (auto on generate, or use Import from White-box)."
+    )
     if st.button(
         "Build State Model",
         disabled=not st.session_state.risk_results,
@@ -477,45 +645,42 @@ def main():
             f"States: {len(model.get('states', []))} | "
             f"Transitions: {len(model.get('transitions', []))}"
         )
+        _render_state_model_graph(model)
 
-        states_df = pd.DataFrame(
-            {"State": model.get("states", [])}
-        )
-        edited_states = st.data_editor(
-            states_df,
-            num_rows="dynamic",
-            use_container_width=True,
-            key="editor_states",
-        )
+        with st.expander("Edit states & transitions (table)", expanded=False):
+            states_df = pd.DataFrame({"State": model.get("states", [])})
+            edited_states = st.data_editor(
+                states_df,
+                num_rows="dynamic",
+                use_container_width=True,
+                key="editor_states",
+            )
 
-        trans_cols = ["from", "to", "event", "guard"]
-        trans_df = _records_to_df(model.get("transitions", []), trans_cols)
-        edited_trans = st.data_editor(
-            trans_df,
-            num_rows="dynamic",
-            use_container_width=True,
-            column_config={
-                "from": st.column_config.TextColumn("From State"),
-                "to": st.column_config.TextColumn("To State"),
-                "event": st.column_config.TextColumn("Event"),
-                "guard": st.column_config.TextColumn("Guard"),
-            },
-            key="editor_transitions",
-        )
+            trans_cols = ["from", "to", "event", "guard"]
+            trans_df = _records_to_df(model.get("transitions", []), trans_cols)
+            edited_trans = st.data_editor(
+                trans_df,
+                num_rows="dynamic",
+                use_container_width=True,
+                column_config={
+                    "from": st.column_config.TextColumn("From State"),
+                    "to": st.column_config.TextColumn("To State"),
+                    "event": st.column_config.TextColumn("Event / Trigger"),
+                    "guard": st.column_config.TextColumn("Guard / Condition"),
+                },
+                key="editor_transitions",
+            )
 
-        st.session_state.state_model = {
-            "states": _df_to_records(edited_states),
-            "transitions": _df_to_records(edited_trans),
-            "initial_state": model.get("initial_state", ""),
-        }
-        st.session_state.state_model["states"] = [
-            s["State"] if isinstance(s, dict) else s
-            for s in st.session_state.state_model["states"]
-        ]
+            st.session_state.state_model = {
+                "states": _df_to_records(edited_states),
+                "transitions": _df_to_records(edited_trans),
+                "initial_state": model.get("initial_state", ""),
+            }
+            st.session_state.state_model["states"] = [
+                s["State"] if isinstance(s, dict) else s
+                for s in st.session_state.state_model["states"]
+            ]
 
-    st.divider()
-
-    st.subheader("6. White-box Test Sequences")
     st.session_state.coverage_criterion = st.selectbox(
         "Coverage Criterion",
         options=VALID_COVERAGE_CRITERIA,
@@ -564,128 +729,225 @@ def main():
 
     st.divider()
 
-    st.subheader("7. Coverage Items")
-    if st.button(
-        "Generate Coverage Items",
-        disabled=not st.session_state.risk_results,
-    ):
+    st.subheader("4. Black-box Test Design")
+
+    st.markdown("**Coverage Items**")
+    ci_col1, ci_col2 = st.columns(2)
+    with ci_col1:
+        gen_ci = st.button(
+            "Generate Coverage Items",
+            type="primary",
+            disabled=not st.session_state.risk_results,
+            key="btn_gen_coverage_items",
+        )
+    with ci_col2:
+        import_wb = st.button(
+            "Import from White-box",
+            disabled=not _has_whitebox_artifacts(),
+            key="btn_import_whitebox_ci",
+        )
+
+    if gen_ci:
         with st.spinner("Identifying coverage items..."):
             try:
-                st.session_state.coverage_items = generate_coverage_items(
-                    st.session_state.requirements
-                )
+                bb = generate_coverage_items(st.session_state.requirements)
+                wb_count = 0
+                if _has_whitebox_artifacts():
+                    wb = _whitebox_coverage_items()
+                    wb_count = len(wb)
+                    merged = merge_coverage_items(bb, wb)
+                else:
+                    merged = bb
+                st.session_state.coverage_items = merged
                 st.session_state.coverage_with_strategy = []
                 st.session_state.testcases = []
-                st.success(
-                    f"Generated {len(st.session_state.coverage_items)} coverage item(s)."
-                )
+                st.session_state.oracles = []
+                st.session_state.optimization_metrics = {}
+                _reset_data_editors("editor_coverage_items", "editor_strategy_tc")
+                if wb_count:
+                    st.success(
+                        f"Generated {len(bb)} black-box + {wb_count} white-box "
+                        f"= {len(merged)} coverage item(s)."
+                    )
+                else:
+                    st.success(
+                        f"Generated {len(merged)} coverage item(s)."
+                    )
             except Exception as exc:
                 st.error(f"Coverage item generation failed: {exc}")
+
+    if import_wb:
+        with st.spinner("Importing white-box coverage items..."):
+            try:
+                wb = _whitebox_coverage_items()
+                before = len(st.session_state.coverage_items)
+                st.session_state.coverage_items = merge_coverage_items(
+                    st.session_state.coverage_items, wb
+                )
+                added = len(st.session_state.coverage_items) - before
+                _reset_data_editors("editor_coverage_items", "editor_strategy_tc")
+                st.success(f"Imported {added} white-box coverage item(s).")
+            except Exception as exc:
+                st.error(f"White-box import failed: {exc}")
+
     edited_ci = st.data_editor(
-        _records_to_df(
-            st.session_state.coverage_items,
-            ["coverage_id", "coverage_item", "related_req"],
-        ),
+        _records_to_df(st.session_state.coverage_items, COVERAGE_ITEM_COLUMNS),
         num_rows="dynamic",
         use_container_width=True,
-        key="editor_coverage",
+        key="editor_coverage_items",
     )
     st.session_state.coverage_items = _df_to_records(edited_ci)
 
-    st.divider()
+    st.markdown("**Strategies & Test Cases**")
+    has_coverage = bool(st.session_state.coverage_items)
 
-    st.subheader("8. Test Strategies")
     if st.button(
-        "Generate Test Strategies",
-        disabled=not st.session_state.coverage_items,
+        "Generate Strategies & Test Cases",
+        type="primary",
+        disabled=not has_coverage,
+        key="btn_gen_strategy_tc",
     ):
-        with st.spinner("Selecting test strategies..."):
+        with st.spinner("Assigning strategies and generating test cases..."):
             try:
-                st.session_state.coverage_with_strategy = select_strategies(
-                    st.session_state.coverage_items
-                )
-                st.session_state.testcases = []
-                methods = {
-                    x["test_method"]
-                    for x in st.session_state.coverage_with_strategy
-                }
-                st.success(
-                    f"Strategies assigned. Techniques used: {', '.join(sorted(methods))}"
-                )
-                if len(methods) < 3:
-                    st.warning(
-                        "Fewer than 3 techniques used. Edit the table or regenerate."
-                    )
-            except Exception as exc:
-                st.error(f"Strategy selection failed: {exc}")
-    edited_strat = st.data_editor(
-        _records_to_df(
-            st.session_state.coverage_with_strategy,
-            ["coverage_id", "coverage_item", "related_req", "test_method"],
-        ),
-        num_rows="dynamic",
-        use_container_width=True,
-        column_config={
-            "test_method": st.column_config.SelectboxColumn(options=VALID_METHODS),
-        },
-        key="editor_strategies",
-    )
-    st.session_state.coverage_with_strategy = _df_to_records(edited_strat)
-
-    st.divider()
-
-    st.subheader("9. Test Cases")
-    if st.button(
-        "Generate Test Cases",
-        disabled=not st.session_state.coverage_with_strategy,
-    ):
-        with st.spinner("Generating test cases..."):
-            try:
+                strats = select_strategies(st.session_state.coverage_items)
                 raw = generate_testcases(
                     st.session_state.requirements,
                     st.session_state.risk_results,
-                    st.session_state.coverage_with_strategy,
+                    strats,
+                    state_model=st.session_state.state_model or None,
+                    whitebox_sequences=_normalize_whitebox_sequences(
+                        st.session_state.whitebox_sequences
+                    ) or None,
                 )
                 for tc in raw:
                     tc["steps"] = _steps_to_str(tc.get("steps", ""))
+                    uid = _row_id(tc)
+                    tc["coverage_id"] = uid
+                    tc["tc_id"] = uid
+                st.session_state.coverage_with_strategy = strats
                 st.session_state.testcases = raw
-                st.success(f"Generated {len(raw)} test case(s).")
+                st.session_state.oracles = []
+                st.session_state.optimization_metrics = {}
+                _reset_data_editors("editor_strategy_tc")
+                methods = {x["test_method"] for x in strats}
+                st.success(
+                    f"Generated {len(raw)} test case(s) · "
+                    f"Techniques: {', '.join(sorted(methods))}"
+                )
+                if len(methods) < 3:
+                    st.warning(
+                        "Fewer than 3 techniques used. Edit test_method below."
+                    )
             except Exception as exc:
-                st.error(f"Test case generation failed: {exc}")
-    edited_tc = st.data_editor(
+                st.error(f"Strategy / test case generation failed: {exc}")
+
+    if not has_coverage:
+        st.info("Generate or add coverage items above first.")
+
+    edited_stc = st.data_editor(
         _records_to_df(
-            st.session_state.testcases,
-            [
-                "tc_id",
-                "req_id",
-                "coverage_id",
-                "test_method",
-                "priority",
-                "preconditions",
-                "test_data",
-                "steps",
-                "expected_result",
-            ],
+            _merge_strategy_tc_rows(
+                st.session_state.coverage_items,
+                st.session_state.coverage_with_strategy,
+                st.session_state.testcases,
+            ),
+            STRATEGY_TC_COLUMNS,
         ),
         num_rows="dynamic",
         use_container_width=True,
         column_config={
+            "coverage_item": st.column_config.TextColumn(
+                disabled=True,
+                help="Synced from coverage items above",
+            ),
             "test_method": st.column_config.SelectboxColumn(options=VALID_METHODS),
             "priority": st.column_config.SelectboxColumn(
                 options=["High", "Medium", "Low"]
             ),
             "steps": st.column_config.TextColumn(help="Separate steps with |"),
         },
-        key="editor_testcases",
+        key="editor_strategy_tc",
+        disabled=not has_coverage,
     )
-    st.session_state.testcases = _df_to_records(edited_tc)
+    if has_coverage:
+        strats, tcs = _split_strategy_tc_rows(
+            _df_to_records(edited_stc),
+            st.session_state.coverage_items,
+        )
+        st.session_state.coverage_with_strategy = strats
+        st.session_state.testcases = tcs
+
+    if st.session_state.testcases:
+        st.markdown("**Optimize Test Suite**")
+        st.caption("Sort, filter or deduplicate test cases after generation.")
+
+        opt_col1, opt_col2 = st.columns([2, 1])
+        with opt_col1:
+            opt_strategy = st.radio(
+                "Optimization",
+                [
+                    "risk – Sort & filter by priority",
+                    "coverage – Remove redundant cases",
+                    "both – Minimize then prioritize",
+                ],
+                horizontal=True,
+                key="opt_strategy",
+                label_visibility="collapsed",
+            )
+        with opt_col2:
+            min_prio = st.select_slider(
+                "Min priority",
+                options=["High", "Medium", "Low"],
+                value="Low",
+                key="opt_min_priority",
+            )
+
+        if st.button("Apply Optimization", key="btn_optimize_suite"):
+            strategy_key = opt_strategy.split(" – ")[0]
+            with st.spinner("Optimizing..."):
+                try:
+                    optimized, metrics = optimize_test_suite(
+                        st.session_state.testcases,
+                        strategy=strategy_key,
+                        min_priority=min_prio,
+                    )
+                    ci_map = {
+                        c["coverage_id"]: c
+                        for c in st.session_state.coverage_items
+                    }
+                    for tc in optimized:
+                        tc["steps"] = _steps_to_str(tc.get("steps", ""))
+                    st.session_state.testcases = optimized
+                    st.session_state.coverage_with_strategy = [
+                        {
+                            "coverage_id": tc["coverage_id"],
+                            "coverage_item": ci_map.get(tc["coverage_id"], {}).get(
+                                "coverage_item", ""
+                            ),
+                            "related_req": tc.get("req_id", ""),
+                            "test_method": tc.get("test_method", ""),
+                        }
+                        for tc in optimized
+                    ]
+                    st.session_state.optimization_metrics = metrics
+                    _reset_data_editors("editor_strategy_tc")
+                    st.success(
+                        f"{metrics['original_count']} → {metrics['optimized_count']} "
+                        f"test cases (removed {metrics['removed_count']})."
+                    )
+                except Exception as exc:
+                    st.error(f"Optimization failed: {exc}")
+
+        if st.session_state.optimization_metrics:
+            m = st.session_state.optimization_metrics
+            mc1, mc2, mc3 = st.columns(3)
+            mc1.metric("Count", m.get("optimized_count", 0))
+            mc2.metric("Removed", m.get("removed_count", 0))
+            mc3.metric("High priority", m.get("high_count", "—"))
 
     st.divider()
 
-    # -----------------------------------------------------------------------
-    # 10. Generate Pytest Files (processing happens here)
-    # -----------------------------------------------------------------------
-    st.subheader("10. Generate Pytest Files")
+    st.subheader("5. Generate Pytest Files")
 
     gen_disabled = (
         not st.session_state.testcases
@@ -705,7 +967,7 @@ def main():
                 st.session_state.generated_pytest = generate_pytest(
                     testcases=st.session_state.testcases,
                     source_files=st.session_state.source_files,
-                    app_name=st.session_state.app_name,
+                    app_name="AutoTestDesign",
                 )
                 st.session_state.pytest_output = ""
                 st.success("Pytest file generated.")
@@ -723,10 +985,7 @@ def main():
         )
         st.session_state.generated_pytest = edited_code
 
-        app_slug = (
-            st.session_state.app_name.strip().replace(" ", "_")
-            or "generated"
-        )
+        app_slug = "generated"
         st.download_button(
             label="Download pytest file",
             data=st.session_state.generated_pytest.encode("utf-8"),
@@ -813,7 +1072,7 @@ def main():
     # -----------------------------------------------------------------------
     # FR 5.0 – Test Oracle Generation
     # -----------------------------------------------------------------------
-    st.subheader("11. Test Oracle Generation (FR 5.0)")
+    st.subheader("6. Test Oracle Generation (FR 5.0)")
     st.caption(
         "Select a requirement and enter specific test data to synthesize a "
         "precise expected result and validation rules."
@@ -865,7 +1124,7 @@ def main():
                     except Exception as exc:
                         st.error(f"Oracle generation failed: {exc}")
         else:
-            st.info("Parse requirements first (Step 3).")
+            st.info("Parse requirements first (Step 1).")
 
     else:
         st.caption(
@@ -903,98 +1162,6 @@ def main():
                 pd.DataFrame(oracle_display),
                 use_container_width=True,
             )
-
-    st.divider()
-
-    # -----------------------------------------------------------------------
-    # FR 7.0 – Test Suite Optimization
-    # -----------------------------------------------------------------------
-    st.subheader("12. Test Suite Optimization (FR 7.0)")
-    st.caption(
-        "Prioritize or minimize the generated test suite based on risk or "
-        "coverage efficiency."
-    )
-
-    opt_strategy = st.radio(
-        "Optimization strategy",
-        [
-            "risk – Sort & filter by risk priority",
-            "coverage – Remove redundant test cases",
-            "both – Minimize then prioritize",
-        ],
-        horizontal=True,
-        key="opt_strategy",
-    )
-    strategy_key = opt_strategy.split(" – ")[0]
-
-    min_prio = st.select_slider(
-        "Minimum priority to keep (for risk-based strategies)",
-        options=["High", "Medium", "Low"],
-        value="Low",
-        key="opt_min_priority",
-    )
-
-    if st.button(
-        "Optimize Test Suite",
-        type="primary",
-        disabled=not st.session_state.testcases,
-    ):
-        source = st.session_state.testcases
-        with st.spinner("Optimizing..."):
-            try:
-                optimized, metrics = optimize_test_suite(
-                    source, strategy=strategy_key, min_priority=min_prio
-                )
-                st.session_state.optimized_testcases = optimized
-                st.session_state.optimization_metrics = metrics
-                st.success(
-                    f"Optimized: {metrics['original_count']} → "
-                    f"{metrics['optimized_count']} test cases "
-                    f"(removed {metrics['removed_count']})."
-                )
-            except Exception as exc:
-                st.error(f"Optimization failed: {exc}")
-
-    if st.session_state.optimization_metrics:
-        m = st.session_state.optimization_metrics
-        cols = st.columns(4)
-        cols[0].metric("Original", m.get("original_count", 0))
-        cols[1].metric("Optimized", m.get("optimized_count", 0))
-        cols[2].metric("Removed", m.get("removed_count", 0))
-        cols[3].metric(
-            "High priority",
-            m.get("high_count", "—"),
-        )
-        st.caption(f"Strategy applied: **{m.get('strategy', '—')}**")
-
-    if st.session_state.optimized_testcases:
-        edited_opt = st.data_editor(
-            _records_to_df(
-                st.session_state.optimized_testcases,
-                [
-                    "tc_id",
-                    "req_id",
-                    "coverage_id",
-                    "test_method",
-                    "priority",
-                    "preconditions",
-                    "test_data",
-                    "steps",
-                    "expected_result",
-                ],
-            ),
-            num_rows="dynamic",
-            use_container_width=True,
-            column_config={
-                "test_method": st.column_config.SelectboxColumn(options=VALID_METHODS),
-                "priority": st.column_config.SelectboxColumn(
-                    options=["High", "Medium", "Low"]
-                ),
-                "steps": st.column_config.TextColumn(help="Separate steps with |"),
-            },
-            key="editor_optimized",
-        )
-        st.session_state.optimized_testcases = _df_to_records(edited_opt)
 
     st.divider()
     _export_section()

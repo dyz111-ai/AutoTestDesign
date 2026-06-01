@@ -7,6 +7,14 @@ VALID_METHODS = [
     "State Transition Testing",
 ]
 
+STATE_TRANSITION = "State Transition Testing"
+
+
+def _is_whitebox_item(item: dict) -> bool:
+    if item.get("source") == "whitebox":
+        return True
+    return str(item.get("coverage_id", "")).upper().startswith("WB-")
+
 
 def _normalize_method(method: str) -> str:
     normalized = method.strip()
@@ -16,10 +24,38 @@ def _normalize_method(method: str) -> str:
     return "Equivalence Partitioning"
 
 
+def _enrich_strategy_entry(item: dict, method: str) -> dict:
+    entry = {
+        "coverage_id": item["coverage_id"],
+        "coverage_item": item["coverage_item"],
+        "related_req": item["related_req"],
+        "test_method": _normalize_method(method),
+    }
+    for key in (
+        "source", "whitebox_path", "whitebox_events",
+        "whitebox_from", "whitebox_to", "whitebox_event", "whitebox_guard",
+    ):
+        if key in item:
+            entry[key] = item[key]
+    return entry
+
+
 def select_strategies(coverage_items: list) -> list:
     """
     Assigns a black-box test technique to each coverage item.
+    White-box items are automatically assigned State Transition Testing.
     """
+    whitebox_results = []
+    blackbox_items = []
+
+    for item in coverage_items:
+        if _is_whitebox_item(item):
+            whitebox_results.append(_enrich_strategy_entry(item, STATE_TRANSITION))
+        else:
+            blackbox_items.append(item)
+
+    if not blackbox_items:
+        return whitebox_results
 
     methods_list = "\n".join(f"- {m}" for m in VALID_METHODS)
 
@@ -51,18 +87,14 @@ def select_strategies(coverage_items: list) -> list:
     ]
 
     Coverage Items:
-    {coverage_items}
+    {blackbox_items}
     """
 
-    results = chat_completion_json(prompt)
+    llm_results = chat_completion_json(prompt)
+    blackbox_results = [
+        _enrich_strategy_entry(item, item["test_method"])
+        for item in llm_results
+    ]
 
-    enriched = []
-    for item in results:
-        enriched.append({
-            "coverage_id": item["coverage_id"],
-            "coverage_item": item["coverage_item"],
-            "related_req": item["related_req"],
-            "test_method": _normalize_method(item["test_method"]),
-        })
-
-    return enriched
+    by_id = {r["coverage_id"]: r for r in whitebox_results + blackbox_results}
+    return [by_id[item["coverage_id"]] for item in coverage_items if item["coverage_id"] in by_id]

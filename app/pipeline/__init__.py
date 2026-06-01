@@ -9,6 +9,10 @@ from app.pipeline.strategy_selector import VALID_METHODS, select_strategies
 from app.pipeline.test_oracle_generator import batch_generate_oracles, generate_oracle
 from app.pipeline.test_suite_optimizer import optimize_test_suite
 from app.pipeline.testcase_generator import generate_testcases
+from app.pipeline.whitebox_coverage_bridge import (
+    coverage_items_from_whitebox,
+    merge_coverage_items,
+)
 from app.pipeline.whitebox_modeler import build_state_model
 from app.pipeline.whitebox_sequence_generator import (
     VALID_COVERAGE_CRITERIA,
@@ -27,6 +31,8 @@ __all__ = [
     "batch_generate_oracles",
     "optimize_test_suite",
     "build_state_model",
+    "coverage_items_from_whitebox",
+    "merge_coverage_items",
     "VALID_COVERAGE_CRITERIA",
     "generate_sequences",
     "generate_pytest",
